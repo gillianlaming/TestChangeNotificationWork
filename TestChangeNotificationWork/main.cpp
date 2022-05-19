@@ -149,7 +149,6 @@ bool TestOpenRecentlyChangeDirHandleAddFile(std::string* reason)
 		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
 		CloseHandle(directory);
 		CloseHandle(file);
-		BOOL del = DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
 		return false;
 	}
 	 
@@ -157,80 +156,229 @@ bool TestOpenRecentlyChangeDirHandleAddFile(std::string* reason)
 
 	if (!isCachePath)
 	{
-		*reason = FormattedString("Expected a local path but %ws is not \n\n", finalPath);
+		*reason = FormattedString("Expected a local path but %ws is a remote path \n\n", finalPath);
 		CloseHandle(file);
-		DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
 		CloseHandle(directory);
 		return false;
 	}
 
 	CloseHandle(file);
-	DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
 	CloseHandle(directory);
 	return true;
 }
 
 bool TestOpenRecentlyChangedDirectoryDeleteFile(std::string* reason)
+/*
+	Mark directory as recently changed by deleting file right before opening directory handle.
+	Ensure the path is a local path.
+*/
 {
-	printf("do something \n\n");
-	*reason = "Unexpected error calling TestOpenRecentlyChangedDirectoryDeleteFile";
-	return false;
+	//Delete file to mark directory as recently changed
+	bool fRet = DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
+
+	if (!fRet)
+	{
+		*reason = FormattedString("Delete file unexpectedly failed with error code %d \n\n", GetLastError());
+		return false;
+	}
+
+	//Open parent directory handle
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+		GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS,
+		NULL);
+
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (directory) call failed with code %d\n\n", GetLastError());
+		return false;
+	}
+
+	WCHAR finalPath[MAX_PATH] = L"";
+	DWORD dwRet;
+	std::string errorMessage;
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		&errorMessage,
+		finalPath,
+		_countof(finalPath));
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		CloseHandle(directory);
+		return false;
+	}
+
+	bool  isCachePath = IsDynamicCachePath(finalPath);
+
+	if (!isCachePath)
+	{
+		*reason = FormattedString("Expected a local path but %ws is a remote path \n\n", finalPath);
+		CloseHandle(directory);
+		return false;
+	}
+
+	CloseHandle(directory);
+	return true;
 }
 
 bool TestOpenDirectoryNotRecentlyChanged(std::string* reason)
+/*
+	Open a directory which has not been recently changed to act as a control.
+	Expects dynamic cache path
+*/
 {
-	return TRUE;
+	//Open a directory handle
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\UnusedDirectory",
+		GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS,
+		NULL);
+
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
+		return false;
+	}
+
+	WCHAR finalPath[MAX_PATH] = L"";
+	DWORD dwRet;
+	std::string errorMessage;
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		&errorMessage,
+		finalPath,
+		_countof(finalPath));
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		CloseHandle(directory);
+		return false;
+	}
+
+	bool  isCachePath = IsDynamicCachePath(finalPath);
+
+	if (!isCachePath)
+	{
+		*reason = FormattedString("Expected a local path but %ws is a remote path \n\n", finalPath);
+		CloseHandle(directory);
+		return false;
+	}
+
+	CloseHandle(directory);
+	return true;
 }
 
 bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
-{
+/*
+	
+	Call FindFirstFile on this which will open the directory and then call into NtQueryDirectoryFile
+	With my changes, since the directory has been recently modified, the handle should be opened locally
+	If the detour for NtQueryDirectoryFile were not implemented, it would return not found since dynamic cache will not contain this file. 
+	The WEBSITE_DYNAMIC_CACHE_DELAY is set to 1 year, meaning updates to remote will not be propegated to dynamic cache until the remote content is 1 year old
+*/
+{	
+	bool result = FALSE;
+	HANDLE hFind;
+	bool hr = SetEnvironmentVariable(L"WEBSITE_DYNAMIC_CACHE_DELAY", L"31536000"); //TODO: there needs to be a delay here...
 
-	//
-	//Call FindFirstFile on this which will open the directory and then call into NtQueryDirectoryFile
-	//With my changes, since the directory has been recently modified, the handle should be opened locally
-	//If the detour for NtQueryDirectoryFile were not implemented, it would return not found since dynamic cache will not contain this file. 
-	//The WEBSITE_DYNAMIC_CACHE_DELAY is set to 1 year, meaning updates to remote will not be propegated to dynamic cache until the remote content is 1 year old
-	//
-	/*
-	* WIN32_FIND_DATAA FindFileData;
-	HANDLE hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\newfile.txt", &FindFileData);
+	if (!hr)
+	{
+		*reason = "Failed to set WEBSITE_DYNAMIC_CACHE_DELAY env var.";
+		return false;
+	}
+
+	//Create a new file which should not be cached
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile.txt",
+		GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ,
+		NULL,
+		CREATE_NEW,
+		FILE_ATTRIBUTE_NORMAL,
+		NULL);
+
+
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (file) call failed with code %d", GetLastError());
+		goto Finished;
+	}
+
+	//Call findfirst on this file
+	WIN32_FIND_DATAA FindFileData;
+	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\newfile.txt", &FindFileData);
 
 	if (hFind == INVALID_HANDLE_VALUE)
 	{
-		printf("FindFirstFile failed (%d)\n", GetLastError());
+		*reason = FormattedString("FindFirstFile failed (%d)\n", GetLastError());
 		CloseHandle(file);
-		BOOL del = DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
+		DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
+		goto Finished;
+	}
+	else
+	{
+		printf(("The first file found is %s!!!\n\n"), FindFileData.cFileName);
+		hr = FindClose(hFind);
+
+		if (!hr)
+		{
+			printf("FindClose failed (%d)\n", GetLastError());
+		}
+
+		CloseHandle(file);
+		DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
+		result = true;
+	}
+
+Finished:
+	//Reset Dynamic cache delay in seconds to original value
+	hr = SetEnvironmentVariable(L"WEBSITE_DYNAMIC_CACHE_DELAY", L"");
+
+	if (!hr)
+	{
+		printf("Failed to unset WEBSITE_DYNAMIC_CACHE_DELAY env var, %d", GetLastError());
+		
+	}
+
+	return result;
+}
+
+bool TestQueryDirectoryFileOnHydratedDir(std::string* reason)
+/*
+	Run findfirst on a file which exists in dynamic cache
+*/
+{
+	//Call findfirst on this file
+	WIN32_FIND_DATAA FindFileData;
+	BOOL hr;
+	HANDLE hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\hostingstart.html", &FindFileData);
+
+	if (hFind == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("FindFirstFile failed (%d)\n", GetLastError());
 		return false;
 	}
 	else
 	{
 		printf(("The first file found is %s!!!\n\n"), FindFileData.cFileName);
-		bool ret = CancelIoEx(directory, NULL);
-		printf("CancelIoEx returned %d \n\n", ret);
-		FindClose(hFind);
-		CloseHandle(file);
+		hr = FindClose(hFind);
+
+		if (!hr)
+		{
+			printf("FindClose failed (%d)\n", GetLastError());
+		}
+
+		return true;
 	}
-
-	BOOL del = DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
-
-	
-	retVal = GetFinalPathNameByHandleW(file, filePath, _countof(filePath), 0);
-
-	if (retVal == 0)
-	{
-		printf("getfinalpathnamebyhandle failed with %d", GetLastError());
-		return -1;
-	}
-
-	printf("\n\nThe path to the FILE HANDLE IS:");
-	wprintf(filePath);
-	*/
-	return true;
-}
-
-bool TestQueryDirectoryFileOnHydratedDir(std::string* reason)
-{
-	return true;
 }
 
 #pragma endregion
@@ -289,9 +437,11 @@ int main()
 		fflush(stdout);
 	}
 
+	//Note: these tests are in a specific order. Reordering them may result in unexpected behavior or false indications of success
+	ADD_TEST_CASE(TestOpenDirectoryNotRecentlyChanged);
 	ADD_TEST_CASE(TestOpenRecentlyChangeDirHandleAddFile);
 	ADD_TEST_CASE(TestOpenRecentlyChangedDirectoryDeleteFile);
-	ADD_TEST_CASE(TestOpenDirectoryNotRecentlyChanged);
+	
 	ADD_TEST_CASE(TestQueryDirectoryFileOnRecentlyChangedDir);
 	ADD_TEST_CASE(TestQueryDirectoryFileOnHydratedDir);
 	
