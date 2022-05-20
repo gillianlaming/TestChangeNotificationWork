@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <iostream>
 #include <wchar.h>
+#include <thread>
 
 #define MAX_TEST_CASES 256
 #define ADD_TEST_CASE(f) AddTestCase(L#f, f)
@@ -79,6 +80,53 @@ bool IsDynamicCachePath(PWSTR path)
 	}
 
 	return false;
+}
+
+void CreateNewFileInNestedSubdir() 
+{
+	//Add a brief sleep for synchronization
+	Sleep(1000 * 10);
+
+	//Open with delete on close so I don't have to do any cleanup
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\a\\b\\c\\d\\newfile.txt",
+		DELETE,
+		FILE_SHARE_READ | FILE_SHARE_DELETE,
+		NULL,
+		CREATE_NEW,
+		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
+		NULL);
+
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		printf("CreatefileW (file) call failed with code %d", GetLastError());
+	}
+	else
+	{
+		CloseHandle(file);
+	}
+}
+
+void CreateFileInWwwroot()
+{
+	//Add a brief sleep for synchronization
+	Sleep(1000);
+
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile123.txt",
+		DELETE,
+		FILE_SHARE_READ | FILE_SHARE_DELETE,
+		NULL,
+		CREATE_NEW,
+		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
+		NULL);
+
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		printf("CreatefileW (file) call failed with code %d", GetLastError());
+	}
+	else
+	{
+		CloseHandle(file);
+	}
 }
 
 #pragma endregion
@@ -471,7 +519,12 @@ bool TestOpenDirectoryWithWrite(std::string* reason)
 	return true;
 }
 
-bool TestReadDirectoryChanges(std::string* reason)
+bool TestStandardReadDirectoryChangesCall(std::string* reason)
+/*+
+	Test call to read directory changes with local handle.
+	Note: for this test, you need to manually add a file.
+	I tested this and it works if you add files to origin
+*/
 {
 	//open directory handle to listen to change notifications on
 	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
@@ -509,7 +562,7 @@ bool TestReadDirectoryChanges(std::string* reason)
 
 	if (!IsDynamicCachePath(finalPath))
 	{
-		*reason = FormattedString("We are listening for change notifications on a remote path. Path is %ws", finalPath);
+		*reason = FormattedString("Expected local path, but instead listening for change notifications on a remote path. Path is %ws", finalPath);
 		CloseHandle(directory);
 		return false;
 	}
@@ -536,8 +589,11 @@ bool TestReadDirectoryChanges(std::string* reason)
 		&overlapped,
 		NULL);
 
+	std::thread thread(CreateFileInWwwroot);
+
 	DWORD dwWaitStatus = WaitForSingleObject(overlapped.hEvent, 1000*60);
 
+	thread.join();
 	if (dwWaitStatus == WAIT_OBJECT_0)
 	{
 		dwRet = GetOverlappedResult(directory, &overlapped, &dwBytesTransferred, FALSE);
@@ -579,6 +635,160 @@ bool TestReadDirectoryChanges(std::string* reason)
 	}
 
 	return FALSE;
+}
+
+bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
+/*
+	Test ReadDirectoryChanges() call on a recently created nested directory (which may not exist in dynamic cache)
+
+	Procedure:
+		Create a new directory nested under wwwroot
+		Call ReadDirectoryChanges on WWWROOT
+		Create a file in recently created nested directory and see if change notification fires
+
+	I delete this newly created directory at the end
+*/
+{
+	BOOL result = FALSE;
+	DWORD dwWaitStatus;
+	WCHAR finalPath[MAX_PATH] = L"";
+	std::string errorMessage;
+	OVERLAPPED overlapped = { 0 };
+	DWORD dwBytesTransferred = 0;
+	std::thread thread(CreateNewFileInNestedSubdir);
+
+	//Create a new directory very nested under wwwroot
+	//Note: this is not pretty code...
+	DWORD dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\a", NULL) &&
+				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\a\\b", NULL) &&
+				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\a\\b\\c", NULL) &&
+				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\a\\b\\c\\d", NULL);
+
+	//brief sleep to prevent change notifiation firing
+	Sleep(100);
+
+	if (!dwRet)
+	{
+		*reason = FormattedString("Create new directory failed with %d", GetLastError());
+		return result;
+	}
+
+	//open directory handle to listen to change notifications on
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+		FILE_LIST_DIRECTORY,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+		NULL);
+
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
+		goto Finished;
+	}
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		&errorMessage,
+		finalPath,
+		_countof(finalPath));
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		goto Finished;
+	}
+
+	if (!IsDynamicCachePath(finalPath))
+	{
+		*reason = FormattedString("Expected local path, but instead listening for change notifications on a remote path. Path is %ws", finalPath);
+		goto Finished;
+	}
+
+	printf("Listening to change notifications on path %ws\n\n", finalPath);
+	unsigned char buffer[8192];
+
+	ZeroMemory(&overlapped, sizeof(overlapped));
+	overlapped.hEvent = CreateEvent(NULL, /*manual reset*/ TRUE, /*initial state*/ FALSE, NULL);
+	if (overlapped.hEvent == NULL)
+	{
+		*reason = FormattedString("Create event failed with code %d \n\n", GetLastError());
+		goto Finished;
+	}
+
+	//make a call to read directory changes
+	dwRet = ReadDirectoryChangesW(
+		directory,
+		buffer,
+		_countof(buffer),
+		TRUE,
+		FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+		NULL,
+		&overlapped,
+		NULL);
+
+	dwWaitStatus = WaitForSingleObject(overlapped.hEvent, 1000 * 60);
+
+	thread.join();
+
+	if (dwWaitStatus == WAIT_OBJECT_0)
+	{
+		dwRet = GetOverlappedResult(directory, &overlapped, &dwBytesTransferred, FALSE);
+
+		if (!dwRet)
+		{
+			*reason = FormattedString("GetOverlappedResult failed with code %d\n\n", GetLastError());
+			goto Finished;
+		}
+
+		unsigned char* currentRecord = buffer;
+		PFILE_NOTIFY_INFORMATION notifyInfo = (PFILE_NOTIFY_INFORMATION)currentRecord;
+
+		WCHAR filename[MAX_PATH] = { 0 };
+
+		DWORD action = notifyInfo->Action;
+
+		// Copy out the file name as it is not null terminated.
+		if (notifyInfo->FileNameLength < (MAX_PATH * sizeof(WCHAR)))
+		{
+			CopyMemory(filename, notifyInfo->FileName, notifyInfo->FileNameLength);
+
+			printf("Change notification arrived for file %ws and action %d\n\n", filename, action);
+
+			result = TRUE;
+			goto Finished;
+		}
+	}
+	else
+	{
+		//assume timeout
+		*reason = "ReadDirectoryChanges() call timed out";
+		goto Finished;
+	}
+
+Finished:
+	if (overlapped.hEvent != NULL)
+	{
+		CloseHandle(overlapped.hEvent);
+	}
+
+	if (directory != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(directory);
+	}
+
+	dwRet = RemoveDirectory(L"D:\\home\\site\\wwwroot\\a\\b\\c\\d") &&
+			RemoveDirectory(L"D:\\home\\site\\wwwroot\\a\\b\\c") &&
+			RemoveDirectory(L"D:\\home\\site\\wwwroot\\a\\b") &&
+			RemoveDirectory(L"D:\\home\\site\\wwwroot\\a");
+
+	if (!dwRet)
+	{
+		printf("Delete directory failed with code %d\n\n", GetLastError());
+	}
+	
+	return result;
 }
 
 #pragma endregion
@@ -674,7 +884,8 @@ int main()
 	//ADD_TEST_CASE(TestQueryDirectoryFileOnRecentlyChangedDirWithoutDetour);
 	ADD_TEST_CASE(TestQueryDirectoryFileOnHydratedDir);
 	ADD_TEST_CASE(TestOpenDirectoryWithWrite);
-	ADD_TEST_CASE(TestReadDirectoryChanges);
+	ADD_TEST_CASE(TestStandardReadDirectoryChangesCall);
+	ADD_TEST_CASE(TestReadDirectoryChangesNestedDirectory);
 	
 	RunTests();
 }
