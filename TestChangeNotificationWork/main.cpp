@@ -791,6 +791,73 @@ Finished:
 	return result;
 }
 
+bool TestCreateAndDeleteDirectory(std::string* reason)
+/*
+	Create a new directory at origin, then delete the directory to ensure it is delete from origin and not just locally
+*/
+{
+	WCHAR finalPath[MAX_PATH] = L"";
+	DWORD dwRet;
+	std::string errorMessage;
+
+	//Enter detour to ensure directory is created at origin
+	//enterDetour();
+	dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\newDir", NULL);
+	//leaveDetour();
+
+	if (!dwRet)
+	{
+		*reason = FormattedString("Directory creation failed with code %d", GetLastError());
+		return false;
+	}
+
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\newDir",
+		GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS,
+		NULL);
+
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
+		return false;
+	}
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		&errorMessage,
+		finalPath,
+		_countof(finalPath));
+
+	CloseHandle(directory);
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		return false;
+	}
+
+	if (!IsDynamicCachePath(finalPath))
+	{
+		*reason = FormattedString("Newly created directory handle is a remote handle %ws", finalPath);
+		RemoveDirectory(L"D:\\home\\site\\wwwroot\\newDir");
+		return false;
+	}
+	
+	//now delete the directory and ensure it is cleaned up properly
+	dwRet = RemoveDirectory(L"D:\\home\\site\\wwwroot\\newDir");
+	if (!dwRet)
+	{
+		*reason = FormattedString("Directory deletion failed with code %d", GetLastError());
+		return false;
+	}
+
+
+	return true;
+}
+
 #pragma endregion
 
 void RunTests()
@@ -829,6 +896,7 @@ void RunTests()
 
 		totalTests++;
 		printf("\n");
+		fflush(stdout);
 	}
 
 	printf("%d/%d tests passed(%.2f%%)\n", passedTests, totalTests, ((float)passedTests / (float)totalTests) * 100.0f);
@@ -876,7 +944,7 @@ int main()
 		printf("Setup failed with code %d. Aborting tests.\n\n", GetLastError());
 	}
 
-	//Note: these tests are in a specific order. Reordering them may result in unexpected behavior or false indications of success
+	//Note: these tests are in a specific order. Please do not reorder them. Otherwise synchronization could be messed up
 	ADD_TEST_CASE(TestOpenDirectoryNotRecentlyChanged);
 	ADD_TEST_CASE(TestOpenRecentlyChangeDirHandleAddFile);
 	ADD_TEST_CASE(TestOpenRecentlyChangedDirectoryDeleteFile);
@@ -886,6 +954,7 @@ int main()
 	ADD_TEST_CASE(TestOpenDirectoryWithWrite);
 	ADD_TEST_CASE(TestStandardReadDirectoryChangesCall);
 	ADD_TEST_CASE(TestReadDirectoryChangesNestedDirectory);
+	ADD_TEST_CASE(TestCreateAndDeleteDirectory);
 	
 	RunTests();
 }
