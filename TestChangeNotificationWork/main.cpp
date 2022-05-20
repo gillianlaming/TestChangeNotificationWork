@@ -546,6 +546,7 @@ bool TestStandardReadDirectoryChangesCall(std::string* reason)
 	std::string errorMessage;
 	OVERLAPPED overlapped = { 0 };
 	DWORD dwBytesTransferred = 0;
+	DWORD dwBytesReturned = 0;
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
@@ -585,7 +586,7 @@ bool TestStandardReadDirectoryChangesCall(std::string* reason)
 		_countof(buffer),
 		TRUE,
 		FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
-		NULL,
+		&dwBytesReturned,
 		&overlapped,
 		NULL);
 
@@ -655,6 +656,7 @@ bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
 	std::string errorMessage;
 	OVERLAPPED overlapped = { 0 };
 	DWORD dwBytesTransferred = 0;
+	DWORD dwBytesReturned = 0;
 	std::thread thread(CreateNewFileInNestedSubdir);
 
 	//Create a new directory very nested under wwwroot
@@ -724,7 +726,7 @@ bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
 		_countof(buffer),
 		TRUE,
 		FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
-		NULL,
+		&dwBytesReturned,
 		&overlapped,
 		NULL);
 
@@ -800,17 +802,15 @@ bool TestCreateAndDeleteDirectory(std::string* reason)
 	DWORD dwRet;
 	std::string errorMessage;
 
-	//Enter detour to ensure directory is created at origin
-	//enterDetour();
 	dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\newDir", NULL);
-	//leaveDetour();
-
+	
 	if (!dwRet)
 	{
 		*reason = FormattedString("Directory creation failed with code %d", GetLastError());
 		return false;
 	}
 
+	//Open the directory handle
 	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\newDir",
 		GENERIC_READ,
 		FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -818,7 +818,7 @@ bool TestCreateAndDeleteDirectory(std::string* reason)
 		OPEN_EXISTING,
 		FILE_FLAG_BACKUP_SEMANTICS,
 		NULL);
-
+		
 	if (directory == INVALID_HANDLE_VALUE)
 	{
 		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
@@ -858,7 +858,96 @@ bool TestCreateAndDeleteDirectory(std::string* reason)
 	return true;
 }
 
+bool TestWriteDirectoryAttributes(std::string* reason)
+{
+	//create a directory and mark it as old
+	BOOL dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir", NULL);
+
+	if (!dwRet)
+	{
+		*reason = FormattedString("Directory creation failed with code %d", GetLastError());
+		return false;
+	}
+
+	//Open the directory handle
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\oldDir",
+		GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_WRITE_ATTRIBUTES,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS,
+		NULL);
+
+	WCHAR finalPath[MAX_PATH] = L"";
+	std::string errorMessage;
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		&errorMessage,
+		finalPath,
+		_countof(finalPath));
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		CloseHandle(directory);
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+		return false;
+	}
+
+	if (IsDynamicCachePath(finalPath))
+	{
+		*reason = FormattedString("Path is a dynamic cache when it should be a remote path %ss\n\n", finalPath);
+		CloseHandle(directory);
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+		return false;
+	}
+
+	FILE_BASIC_INFO fileInfo;
+
+	if (!GetFileInformationByHandleEx(
+		directory,
+		FileBasicInfo,
+		&fileInfo,
+		sizeof(fileInfo)))
+	{
+		*reason = FormattedString("Failed to get file information: %d\n\n", GetLastError());
+		CloseHandle(directory);
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+		return FALSE;
+	}
+
+	SYSTEMTIME systemTime;
+	GetSystemTime(&systemTime);
+	systemTime.wYear = 1989;
+	systemTime.wMonth = 1;
+	systemTime.wDay = 1;
+	FILETIME fileTime;
+	SystemTimeToFileTime(&systemTime, &fileTime);
+
+	// Set the timestamp to the beginning of the FILETIME times to make it look like created long time ago
+	memcpy(&fileInfo.CreationTime, &fileTime, sizeof(FILETIME));
+	memcpy(&fileInfo.LastWriteTime, &fileTime, sizeof(FILETIME));
+	memcpy(&fileInfo.ChangeTime, &fileTime, sizeof(FILETIME));
+
+	dwRet = SetFileInformationByHandle(directory, FileBasicInfo, &fileInfo, sizeof(fileInfo));
+
+	if (!dwRet)
+	{
+		*reason = FormattedString("Failed to set file information with error %d", GetLastError());
+		CloseHandle(directory);
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+		return false;
+	}
+
+	CloseHandle(directory);
+	//RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+	return true;
+}
+
 #pragma endregion
+
+#pragma region Main Execution methods
 
 void RunTests()
 {
@@ -955,6 +1044,13 @@ int main()
 	ADD_TEST_CASE(TestStandardReadDirectoryChangesCall);
 	ADD_TEST_CASE(TestReadDirectoryChangesNestedDirectory);
 	ADD_TEST_CASE(TestCreateAndDeleteDirectory);
+	ADD_TEST_CASE(TestWriteDirectoryAttributes);
+
+	//Test readdirectorychanges on newly created directory
+	//test rename directory
+
 	
 	RunTests();
 }
+
+#pragma endregion
