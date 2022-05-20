@@ -945,6 +945,65 @@ bool TestWriteDirectoryAttributes(std::string* reason)
 	return true;
 }
 
+bool TestRenameDirectory(std::string* reason)
+{
+	//Need to create a directory to rename
+	/*
+	BOOL dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\directoryToRename", NULL);
+
+	if (!dwRet)
+	{
+		*reason = FormattedString("Directory creation failed with code %d", GetLastError());
+		return false;
+	}
+	*/
+	DWORD dwRet = MoveFileExA(
+				"D:\\home\\site\\wwwroot\\directoryToRename",
+				"D:\\home\\site\\wwwroot\\RenamedDirectory",
+				NULL);
+
+	//ensure it exists remotely by detouring dynamic cache before opening
+	enterDetour();
+
+	HANDLE hRenamedDir = CreateFileW(L"D:\\home\\site\\wwwroot\\oldDir",
+								GENERIC_READ,
+								FILE_SHARE_READ,
+								NULL,
+								OPEN_EXISTING,
+								FILE_FLAG_BACKUP_SEMANTICS,
+								NULL);
+	leaveDetour();
+
+	WCHAR finalPath[MAX_PATH] = L"";
+	std::string errorMessage;
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		hRenamedDir,
+		&errorMessage,
+		finalPath,
+		_countof(finalPath));
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		CloseHandle(hRenamedDir);
+		return false;
+	}
+
+	bool  isCachePath = IsDynamicCachePath(finalPath);
+
+	if (isCachePath)
+	{
+		*reason = FormattedString("Expected a remote path but %ws is a local path \n\n", finalPath);
+		CloseHandle(hRenamedDir);
+		return false;
+	}
+
+	//need to ensure cache is hydrated thoug
+
+	return true;
+}
+
 #pragma endregion
 
 #pragma region Main Execution methods
@@ -1010,6 +1069,10 @@ bool RunSetup()
 		return false;
 	}
 
+	//TODO: delete any files/directories if they exist from previous runs
+	//It's okay if these fail -- they might not exist so failure would be expected.
+	RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+
 	return true;
 }
 
@@ -1045,7 +1108,7 @@ int main()
 	ADD_TEST_CASE(TestReadDirectoryChangesNestedDirectory);
 	ADD_TEST_CASE(TestCreateAndDeleteDirectory);
 	ADD_TEST_CASE(TestWriteDirectoryAttributes);
-
+	ADD_TEST_CASE(TestRenameDirectory);
 	//Test readdirectorychanges on newly created directory
 	//test rename directory
 
