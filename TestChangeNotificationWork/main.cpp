@@ -6,7 +6,7 @@
 #define ADD_TEST_CASE(f) AddTestCase(L#f, f)
 
 
-bool waitfordebugger = false;
+bool waitfordebugger = FALSE;
 int g_testCaseCount = 0;
 
 struct TestCaseInfo
@@ -19,6 +19,9 @@ struct TestCaseInfo g_testCases[MAX_TEST_CASES];
 
 typedef HANDLE (* pfnEnterDetour)();
 typedef void (* pfnLeaveDetour)();
+
+pfnEnterDetour enterDetour;
+pfnLeaveDetour leaveDetour;
 
 #pragma region Helper Methods
 
@@ -41,23 +44,6 @@ bool EnterDetourAndGetFinalPathNameByHandle(
 	_Out_writes_(cchFilePath) LPWSTR lpszFilePath,
 	_In_ DWORD cchFinalPath)
 {
-	HMODULE module = LoadLibrary(L"picohelper.dll");
-
-	if (module == NULL)
-	{
-		*reason = FormattedString("Could not load module picohelper.dll. Failed with: %d\n", GetLastError());
-		return false;
-	}
-
-	pfnEnterDetour enterDetour = (pfnEnterDetour)GetProcAddress(module, "TestEnterDynamicCacheDetour");
-	pfnLeaveDetour leaveDetour = (pfnLeaveDetour)GetProcAddress(module, "TestLeaveDynamicCacheDetour");
-
-	if (enterDetour == NULL || leaveDetour == NULL)
-	{
-		*reason = FormattedString("get proc address failed with %d \n", GetLastError());
-		return false;
-	}
-
 	enterDetour();
 
 	//TODO: check to see if this is detoured anywhere
@@ -101,7 +87,8 @@ bool IsDynamicCachePath(PWSTR path)
 
 bool TestOpenRecentlyChangeDirHandleAddFile(std::string* reason)
 /*+
-	Open a recently changed directory
+	Open a recently changed directory. Directory is marked as recently changed by adding a file.
+	Expected result: opene local directory
 */
 {
 	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile.txt",
@@ -285,27 +272,24 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 	With my changes, since the directory has been recently modified, the handle should be opened locally
 	If the detour for NtQueryDirectoryFile were not implemented, it would return not found since dynamic cache will not contain this file. 
 	The WEBSITE_DYNAMIC_CACHE_DELAY is set to 1 year, meaning updates to remote will not be propegated to dynamic cache until the remote content is 1 year old
+
 */
 {	
 	bool result = FALSE;
 	HANDLE hFind;
-	bool hr = SetEnvironmentVariable(L"WEBSITE_DYNAMIC_CACHE_DELAY", L"31536000"); //TODO: there needs to be a delay here...
+	bool hr;
 
-	if (!hr)
-	{
-		*reason = "Failed to set WEBSITE_DYNAMIC_CACHE_DELAY env var.";
-		return false;
-	}
-
+	enterDetour();
 	//Create a new file which should not be cached
-	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile.txt",
-		GENERIC_READ | GENERIC_WRITE,
-		FILE_SHARE_READ,
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile1.txt",
+		GENERIC_WRITE,
+		0,
 		NULL,
-		CREATE_NEW,
-		FILE_ATTRIBUTE_NORMAL,
+		OPEN_ALWAYS,
+		0,
 		NULL);
 
+	leaveDetour();
 
 	if (file == INVALID_HANDLE_VALUE)
 	{
@@ -315,13 +299,13 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 
 	//Call findfirst on this file
 	WIN32_FIND_DATAA FindFileData;
-	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\newfile.txt", &FindFileData);
+	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\newfile1.txt", &FindFileData);
 
 	if (hFind == INVALID_HANDLE_VALUE)
 	{
 		*reason = FormattedString("FindFirstFile failed (%d)\n", GetLastError());
 		CloseHandle(file);
-		DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
+		DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile1.txt");
 		goto Finished;
 	}
 	else
@@ -335,20 +319,79 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 		}
 
 		CloseHandle(file);
-		DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
 		result = true;
 	}
 
 Finished:
-	//Reset Dynamic cache delay in seconds to original value
-	hr = SetEnvironmentVariable(L"WEBSITE_DYNAMIC_CACHE_DELAY", L"");
 
-	if (!hr)
+	DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile1.txt");
+	return result;
+}
+
+bool TestQueryDirectoryFileOnRecentlyChangedDirWithoutDetour(std::string* reason)
+/*
+
+	Call FindFirstFile on this which will open the directory and then call into NtQueryDirectoryFile
+	With my changes, since the directory has been recently modified, the handle should be opened locally
+	If the detour for NtQueryDirectoryFile were not implemented, it would return not found since dynamic cache will not contain this file.
+	The WEBSITE_DYNAMIC_CACHE_DELAY is set to 1 year, meaning updates to remote will not be propegated to dynamic cache until the remote content is 1 year old
+
+	logically this wont work. what i need to accomplish is preventing my detour for querydirectoryfile to be bypassed, but for the call to 
+	createfilew (which is detoured) to be hit.
+*/
+{
+	bool result = FALSE;
+	HANDLE hFind;
+	bool hr;
+
+	enterDetour();
+	//Create a new file which should not be cached
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile2.txt",
+			GENERIC_WRITE,
+			0,
+			NULL,
+			CREATE_NEW,
+			0,
+			NULL);
+
+
+	if (file == INVALID_HANDLE_VALUE)
 	{
-		printf("Failed to unset WEBSITE_DYNAMIC_CACHE_DELAY env var, %d", GetLastError());
-		
+		*reason = FormattedString("CreatefileW (file) call failed with code %d", GetLastError());
+		leaveDetour();
+		goto Finished;
 	}
 
+	//Call findfirst on this file
+	WIN32_FIND_DATAA FindFileData;
+	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\newfile2.txt", &FindFileData);
+
+	leaveDetour();
+	if (hFind == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("FindFirstFile failed (%d)\n", GetLastError());
+		CloseHandle(file);
+		DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile1.txt");
+		
+		goto Finished;
+	}
+	else
+	{
+		printf(("The first file found is %s!!!\n\n"), FindFileData.cFileName);
+		hr = FindClose(hFind);
+
+		if (!hr)
+		{
+			printf("FindClose failed (%d)\n", GetLastError());
+		}
+
+		CloseHandle(file);
+		result = true;
+	}
+
+Finished:
+
+	DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile2.txt");
 	return result;
 }
 
@@ -379,6 +422,163 @@ bool TestQueryDirectoryFileOnHydratedDir(std::string* reason)
 
 		return true;
 	}
+}
+
+bool TestOpenDirectoryWithWrite(std::string* reason)
+{
+	//Open a directory handle
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+		GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ,
+		NULL,
+		OPEN_EXISTING,
+		FILE_LIST_DIRECTORY | FILE_FLAG_BACKUP_SEMANTICS,
+		NULL);
+
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
+		return false;
+	}
+
+	WCHAR finalPath[MAX_PATH] = L"";
+	DWORD dwRet;
+	std::string errorMessage;
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		&errorMessage,
+		finalPath,
+		_countof(finalPath));
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		CloseHandle(directory);
+		return false;
+	}
+
+	bool  isCachePath = IsDynamicCachePath(finalPath);
+
+	if (isCachePath)
+	{
+		*reason = FormattedString("Expected a remote path but %ws is a local path \n\n", finalPath);
+		CloseHandle(directory);
+		return false;
+	}
+
+	CloseHandle(directory);
+	return true;
+}
+
+bool TestReadDirectoryChanges(std::string* reason)
+{
+	//open directory handle to listen to change notifications on
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+		FILE_LIST_DIRECTORY,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+		NULL);
+
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
+		return false;
+	}
+
+	WCHAR finalPath[MAX_PATH] = L"";
+	DWORD dwRet;
+	std::string errorMessage;
+	OVERLAPPED overlapped = { 0 };
+	DWORD dwBytesTransferred = 0;
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		&errorMessage,
+		finalPath,
+		_countof(finalPath));
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		CloseHandle(directory);
+		return false;
+	}
+
+	if (!IsDynamicCachePath(finalPath))
+	{
+		*reason = FormattedString("We are listening for change notifications on a remote path. Path is %ws", finalPath);
+		CloseHandle(directory);
+		return false;
+	}
+
+	printf("Listening to change notifications on path %ws\n\n", finalPath);
+	unsigned char buffer[8192];
+
+	ZeroMemory(&overlapped, sizeof(overlapped));
+	overlapped.hEvent = CreateEvent(NULL, /*manual reset*/ TRUE, /*initial state*/ FALSE, NULL);
+	if (overlapped.hEvent == NULL)
+	{
+		*reason = FormattedString("Create event failed with code %d \n\n", GetLastError());
+		return false;
+	}
+
+	//make a call to read directory changes
+	dwRet = ReadDirectoryChangesW(
+		directory,
+		buffer,
+		_countof(buffer),
+		TRUE,
+		FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+		NULL,
+		&overlapped,
+		NULL);
+
+	DWORD dwWaitStatus = WaitForSingleObject(overlapped.hEvent, 1000*60);
+
+	if (dwWaitStatus == WAIT_OBJECT_0)
+	{
+		dwRet = GetOverlappedResult(directory, &overlapped, &dwBytesTransferred, FALSE);
+
+		if (!dwRet)
+		{
+			*reason = FormattedString("GetOverlappedResult failed with code %d\n\n", GetLastError());
+			CloseHandle(directory);
+			return false;
+		}
+
+		unsigned char* currentRecord = buffer;
+		PFILE_NOTIFY_INFORMATION notifyInfo = (PFILE_NOTIFY_INFORMATION)currentRecord;
+
+		WCHAR filename[MAX_PATH] = {0};
+
+		DWORD action = notifyInfo->Action;
+
+		// Copy out the file name as it is not null terminated.
+		if (notifyInfo->FileNameLength < (MAX_PATH * sizeof(WCHAR)))
+		{
+			CopyMemory(filename, notifyInfo->FileName, notifyInfo->FileNameLength);
+
+			printf("Change notification arrived for file %ws and action %d\n\n", filename, action);
+
+			CloseHandle(overlapped.hEvent);
+			CloseHandle(directory);
+			//any other cleanup I have to do here?
+			return TRUE;
+		}
+	}
+	else
+	{
+		//assume timeout
+		*reason = "ReadDirectoryChanges() call timed out";
+		CloseHandle(overlapped.hEvent);
+		CloseHandle(directory);
+		return FALSE;
+	}
+
+	return FALSE;
 }
 
 #pragma endregion
@@ -424,12 +624,34 @@ void RunTests()
 	printf("%d/%d tests passed(%.2f%%)\n", passedTests, totalTests, ((float)passedTests / (float)totalTests) * 100.0f);
 }
 
+bool RunSetup()
+{
+	HMODULE module = LoadLibrary(L"picohelper.dll");
+
+	if (module == NULL)
+	{
+		printf("Could not load module picohelper.dll. Failed with: %d\n", GetLastError());
+		return false;
+	}
+
+	enterDetour = (pfnEnterDetour)GetProcAddress(module, "TestEnterDynamicCacheDetour");
+	leaveDetour = (pfnLeaveDetour)GetProcAddress(module, "TestLeaveDynamicCacheDetour");
+
+	if (enterDetour == NULL || leaveDetour == NULL)
+	{
+		printf("get proc address failed with %d \n", GetLastError());
+		return false;
+	}
+
+	return true;
+}
+
 int main()
 {
 
 	if (waitfordebugger)
 	{
-		printf("Waiting for 30 seconds for the debugger to be attached \n");
+		printf("Waiting for 60 seconds for the debugger to be attached \n");
 		fflush(stdout);
 		Sleep(1000 * 60);
 
@@ -437,13 +659,22 @@ int main()
 		fflush(stdout);
 	}
 
+	bool hr = RunSetup();
+
+	if (!hr)
+	{
+		printf("Setup failed with code %d. Aborting tests.\n\n", GetLastError());
+	}
+
 	//Note: these tests are in a specific order. Reordering them may result in unexpected behavior or false indications of success
 	ADD_TEST_CASE(TestOpenDirectoryNotRecentlyChanged);
 	ADD_TEST_CASE(TestOpenRecentlyChangeDirHandleAddFile);
 	ADD_TEST_CASE(TestOpenRecentlyChangedDirectoryDeleteFile);
-	
 	ADD_TEST_CASE(TestQueryDirectoryFileOnRecentlyChangedDir);
+	//ADD_TEST_CASE(TestQueryDirectoryFileOnRecentlyChangedDirWithoutDetour);
 	ADD_TEST_CASE(TestQueryDirectoryFileOnHydratedDir);
+	ADD_TEST_CASE(TestOpenDirectoryWithWrite);
+	ADD_TEST_CASE(TestReadDirectoryChanges);
 	
 	RunTests();
 }
