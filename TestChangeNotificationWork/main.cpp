@@ -8,6 +8,7 @@
 
 
 bool waitfordebugger = FALSE;
+bool oneTimeEnvSetupForTests = FALSE;
 int g_testCaseCount = 0;
 
 struct TestCaseInfo
@@ -41,7 +42,6 @@ std::string FormattedString(const char* fmt, ...)
 
 bool EnterDetourAndGetFinalPathNameByHandle(
 	_In_ HANDLE handle,
-	_In_ std::string* reason,
 	_Out_writes_(cchFilePath) LPWSTR lpszFilePath,
 	_In_ DWORD cchFinalPath)
 {
@@ -52,7 +52,6 @@ bool EnterDetourAndGetFinalPathNameByHandle(
 
 	if (retVal == 0)
 	{
-		*reason = FormattedString("getfinalpathnamebyhandle failed with %d\n", GetLastError());
 		return false;
 	}
 
@@ -84,11 +83,8 @@ bool IsDynamicCachePath(PWSTR path)
 
 void CreateNewFileInNestedSubdir() 
 {
-	//Add a brief sleep for synchronization
-	Sleep(1000 * 10);
-
 	//Open with delete on close so I don't have to do any cleanup
-	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\a\\b\\c\\d\\newfile.txt",
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\a\\b\\c\\d\\newfile.txt",
 		DELETE,
 		FILE_SHARE_READ | FILE_SHARE_DELETE,
 		NULL,
@@ -106,12 +102,9 @@ void CreateNewFileInNestedSubdir()
 	}
 }
 
-void CreateFileInWwwroot()
+void CreateFileForRDC()
 {
-	//Add a brief sleep for synchronization
-	Sleep(1000);
-
-	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile123.txt",
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\StandardRDC\\newfile123.txt",
 		DELETE,
 		FILE_SHARE_READ | FILE_SHARE_DELETE,
 		NULL,
@@ -139,12 +132,12 @@ bool TestOpenRecentlyChangeDirHandleAddFile(std::string* reason)
 	Expected result: opene local directory
 */
 {
-	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile.txt",
-		GENERIC_READ | GENERIC_WRITE,
-		FILE_SHARE_READ,
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\TestOpenDirRecentlyChanged1\\newfile.txt",
+		GENERIC_READ | GENERIC_WRITE | DELETE,
+		FILE_SHARE_READ | FILE_SHARE_DELETE,
 		NULL,
 		CREATE_NEW,
-		FILE_ATTRIBUTE_NORMAL,
+		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
 		NULL);
 
 
@@ -155,9 +148,9 @@ bool TestOpenRecentlyChangeDirHandleAddFile(std::string* reason)
 	}
 
 	//Open a directory handle
-	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\TestOpenDirRecentlyChanged1",
 		GENERIC_READ,
-		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
 		NULL,
 		OPEN_EXISTING,
 		FILE_FLAG_BACKUP_SEMANTICS,
@@ -171,17 +164,15 @@ bool TestOpenRecentlyChangeDirHandleAddFile(std::string* reason)
 
 	WCHAR finalPath[MAX_PATH] = L"";
 	DWORD dwRet;
-	std::string errorMessage;
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
 		CloseHandle(directory);
 		CloseHandle(file);
 		return false;
@@ -209,13 +200,21 @@ bool TestOpenRecentlyChangedDirectoryDeleteFile(std::string* reason)
 */
 {
 	//Delete file to mark directory as recently changed
-	bool fRet = DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile.txt");
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\TestOpenDirRecentlyChanged2\\newfile.txt",
+		GENERIC_READ | GENERIC_WRITE | DELETE,
+		FILE_SHARE_READ | FILE_SHARE_DELETE,
+		NULL,
+		CREATE_NEW,
+		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
+		NULL);
 
-	if (!fRet)
+	if (file == INVALID_HANDLE_VALUE)
 	{
 		*reason = FormattedString("Delete file unexpectedly failed with error code %d \n\n", GetLastError());
 		return false;
 	}
+
+	CloseHandle(file);
 
 	//Open parent directory handle
 	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
@@ -234,17 +233,15 @@ bool TestOpenRecentlyChangedDirectoryDeleteFile(std::string* reason)
 
 	WCHAR finalPath[MAX_PATH] = L"";
 	DWORD dwRet;
-	std::string errorMessage;
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
 		CloseHandle(directory);
 		return false;
 	}
@@ -271,7 +268,7 @@ bool TestOpenDirectoryNotRecentlyChanged(std::string* reason)
 	//Open a directory handle
 	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\UnusedDirectory",
 		GENERIC_READ,
-		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		FILE_SHARE_READ,
 		NULL,
 		OPEN_EXISTING,
 		FILE_FLAG_BACKUP_SEMANTICS,
@@ -285,17 +282,15 @@ bool TestOpenDirectoryNotRecentlyChanged(std::string* reason)
 
 	WCHAR finalPath[MAX_PATH] = L"";
 	DWORD dwRet;
-	std::string errorMessage;
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
 		CloseHandle(directory);
 		return false;
 	}
@@ -319,17 +314,17 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 	Call FindFirstFile on this which will open the directory and then call into NtQueryDirectoryFile
 	With my changes, since the directory has been recently modified, the handle should be opened locally
 	If the detour for NtQueryDirectoryFile were not implemented, it would return not found since dynamic cache will not contain this file. 
-	The WEBSITE_DYNAMIC_CACHE_DELAY is set to 1 year, meaning updates to remote will not be propegated to dynamic cache until the remote content is 1 year old
-
+	
 */
 {	
 	bool result = FALSE;
 	HANDLE hFind;
 	bool hr;
+	HANDLE file1 = INVALID_HANDLE_VALUE;
 
 	enterDetour();
 	//Create a new file which should not be cached
-	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile1.txt",
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile1.txt",
 		GENERIC_WRITE,
 		0,
 		NULL,
@@ -344,16 +339,25 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 		*reason = FormattedString("CreatefileW (file) call failed with code %d", GetLastError());
 		goto Finished;
 	}
+	
+	//Mark the directory as recently changed by creating and deleting a file
+	file1 = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile2.txt",
+		GENERIC_WRITE | DELETE,
+		FILE_SHARE_DELETE,
+		NULL,
+		OPEN_ALWAYS,
+		FILE_FLAG_DELETE_ON_CLOSE,
+		NULL);
 
-	//Call findfirst on this file
+	CloseHandle(file1);
+
+	//Call findfirst on file
 	WIN32_FIND_DATAA FindFileData;
-	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\newfile1.txt", &FindFileData);
+	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile1.txt", &FindFileData);
 
 	if (hFind == INVALID_HANDLE_VALUE)
 	{
 		*reason = FormattedString("FindFirstFile failed (%d)\n", GetLastError());
-		CloseHandle(file);
-		DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile1.txt");
 		goto Finished;
 	}
 	else
@@ -365,14 +369,14 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 		{
 			printf("FindClose failed (%d)\n", GetLastError());
 		}
-
-		CloseHandle(file);
+		
 		result = true;
 	}
 
 Finished:
 
-	DeleteFileW(L"D:\\home\\site\\wwwroot\\newfile1.txt");
+	CloseHandle(file);
+	DeleteFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile1.txt");
 	return result;
 }
 
@@ -445,13 +449,13 @@ Finished:
 
 bool TestQueryDirectoryFileOnHydratedDir(std::string* reason)
 /*
-	Run findfirst on a file which exists in dynamic cache
+	Run findfirst on a file within a directory which has not been touched
 */
 {
 	//Call findfirst on this file
 	WIN32_FIND_DATAA FindFileData;
 	BOOL hr;
-	HANDLE hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\hostingstart.html", &FindFileData);
+	HANDLE hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\TestDirectories\\FindFirstHydrated\\newfile.txt", &FindFileData);
 
 	if (hFind == INVALID_HANDLE_VALUE)
 	{
@@ -475,7 +479,7 @@ bool TestQueryDirectoryFileOnHydratedDir(std::string* reason)
 bool TestOpenDirectoryWithWrite(std::string* reason)
 {
 	//Open a directory handle
-	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\DirectoryOpenForWrite",
 		GENERIC_READ | GENERIC_WRITE,
 		FILE_SHARE_READ,
 		NULL,
@@ -491,17 +495,15 @@ bool TestOpenDirectoryWithWrite(std::string* reason)
 
 	WCHAR finalPath[MAX_PATH] = L"";
 	DWORD dwRet;
-	std::string errorMessage;
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
 		CloseHandle(directory);
 		return false;
 	}
@@ -521,15 +523,19 @@ bool TestOpenDirectoryWithWrite(std::string* reason)
 
 bool TestStandardReadDirectoryChangesCall(std::string* reason)
 /*+
-	Test call to read directory changes with local handle.
-	Note: for this test, you need to manually add a file.
-	I tested this and it works if you add files to origin
+	Assert handle is opened locally
+	Call ReadDirectoryChanges on this local handle
+	Trigger a change notification and expect a result from this change
+
+	This code is not detoured so it will behave like an app 
+	TODO add another test to test all of this in detour 
+	Want to create all changes with enterdetour() set to true 
 */
 {
 	//open directory handle to listen to change notifications on
-	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\StandardRDC",
 		FILE_LIST_DIRECTORY,
-		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		FILE_SHARE_READ,
 		NULL,
 		OPEN_EXISTING,
 		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
@@ -543,20 +549,18 @@ bool TestStandardReadDirectoryChangesCall(std::string* reason)
 
 	WCHAR finalPath[MAX_PATH] = L"";
 	DWORD dwRet;
-	std::string errorMessage;
 	OVERLAPPED overlapped = { 0 };
 	DWORD dwBytesTransferred = 0;
 	DWORD dwBytesReturned = 0;
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
 		CloseHandle(directory);
 		return false;
 	}
@@ -590,11 +594,10 @@ bool TestStandardReadDirectoryChangesCall(std::string* reason)
 		&overlapped,
 		NULL);
 
-	std::thread thread(CreateFileInWwwroot);
+	CreateFileForRDC();
 
 	DWORD dwWaitStatus = WaitForSingleObject(overlapped.hEvent, 1000*60);
 
-	thread.join();
 	if (dwWaitStatus == WAIT_OBJECT_0)
 	{
 		dwRet = GetOverlappedResult(directory, &overlapped, &dwBytesTransferred, FALSE);
@@ -648,27 +651,32 @@ bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
 		Create a file in recently created nested directory and see if change notification fires
 
 	I delete this newly created directory at the end
+
+	Note: I might need to just test this manually. when I integrate into the main I will be able to pre-create the directories.
+
 */
 {
 	BOOL result = FALSE;
 	DWORD dwWaitStatus;
 	WCHAR finalPath[MAX_PATH] = L"";
-	std::string errorMessage;
 	OVERLAPPED overlapped = { 0 };
 	DWORD dwBytesTransferred = 0;
 	DWORD dwBytesReturned = 0;
-	std::thread thread(CreateNewFileInNestedSubdir);
+	//std::thread thread(CreateNewFileInNestedSubdir);
 
+	enterDetour();
 	//Create a new directory very nested under wwwroot
 	//Note: this is not pretty code...
-	DWORD dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\a", NULL) &&
-				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\a\\b", NULL) &&
-				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\a\\b\\c", NULL) &&
-				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\a\\b\\c\\d", NULL);
+	DWORD dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\a", NULL) &&
+				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\a\\b", NULL) &&
+				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\a\\b\\c", NULL) &&
+				  CreateDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\a\\b\\c\\d", NULL);
+
 
 	//brief sleep to prevent change notifiation firing
 	Sleep(100);
-
+	
+	leaveDetour();
 	if (!dwRet)
 	{
 		*reason = FormattedString("Create new directory failed with %d", GetLastError());
@@ -676,9 +684,9 @@ bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
 	}
 
 	//open directory handle to listen to change notifications on
-	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\a",
 		FILE_LIST_DIRECTORY,
-		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
 		NULL,
 		OPEN_EXISTING,
 		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
@@ -692,13 +700,12 @@ bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d \n\n", GetLastError());
 		goto Finished;
 	}
 
@@ -730,9 +737,9 @@ bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
 		&overlapped,
 		NULL);
 
+	CreateNewFileInNestedSubdir();
+	
 	dwWaitStatus = WaitForSingleObject(overlapped.hEvent, 1000 * 60);
-
-	thread.join();
 
 	if (dwWaitStatus == WAIT_OBJECT_0)
 	{
@@ -780,10 +787,10 @@ Finished:
 		CloseHandle(directory);
 	}
 
-	dwRet = RemoveDirectory(L"D:\\home\\site\\wwwroot\\a\\b\\c\\d") &&
-			RemoveDirectory(L"D:\\home\\site\\wwwroot\\a\\b\\c") &&
-			RemoveDirectory(L"D:\\home\\site\\wwwroot\\a\\b") &&
-			RemoveDirectory(L"D:\\home\\site\\wwwroot\\a");
+	dwRet = RemoveDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\a\\b\\c\\d") &&
+			RemoveDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\a\\b\\c") &&
+			RemoveDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\a\\b") &&
+			RemoveDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\a");
 
 	if (!dwRet)
 	{
@@ -800,9 +807,8 @@ bool TestCreateAndDeleteDirectory(std::string* reason)
 {
 	WCHAR finalPath[MAX_PATH] = L"";
 	DWORD dwRet;
-	std::string errorMessage;
 
-	dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\newDir", NULL);
+	dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\newDir", NULL);
 	
 	if (!dwRet)
 	{
@@ -811,9 +817,9 @@ bool TestCreateAndDeleteDirectory(std::string* reason)
 	}
 
 	//Open the directory handle
-	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\newDir",
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\newDir",
 		GENERIC_READ,
-		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		FILE_SHARE_READ,
 		NULL,
 		OPEN_EXISTING,
 		FILE_FLAG_BACKUP_SEMANTICS,
@@ -827,7 +833,6 @@ bool TestCreateAndDeleteDirectory(std::string* reason)
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
@@ -835,33 +840,52 @@ bool TestCreateAndDeleteDirectory(std::string* reason)
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
 		return false;
 	}
 
 	if (!IsDynamicCachePath(finalPath))
 	{
 		*reason = FormattedString("Newly created directory handle is a remote handle %ws", finalPath);
-		RemoveDirectory(L"D:\\home\\site\\wwwroot\\newDir");
+		RemoveDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\newDir");
 		return false;
 	}
 	
 	//now delete the directory and ensure it is cleaned up properly
-	dwRet = RemoveDirectory(L"D:\\home\\site\\wwwroot\\newDir");
+	dwRet = RemoveDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\newDir");
 	if (!dwRet)
 	{
 		*reason = FormattedString("Directory deletion failed with code %d", GetLastError());
 		return false;
 	}
 
+	//try to open the directory handle remotely and ensure this operation fails. The GENERIC_WRITE flag will ensure it will open remotely
+	directory = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\newDir",
+		GENERIC_READ | GENERIC_WRITE,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS,
+		NULL);
 
-	return true;
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		return true;
+	}
+	else
+	{
+		*reason = FormattedString("Directory unexpectedly exists remotely when it should have been deleted", GetLastError());
+		CloseHandle(directory);
+		return false;
+	}
+
+	return false;
 }
 
 bool TestWriteDirectoryAttributes(std::string* reason)
 {
 	//create a directory and mark it as old
-	BOOL dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir", NULL);
+	BOOL dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\oldDir", NULL);
 
 	if (!dwRet)
 	{
@@ -870,7 +894,7 @@ bool TestWriteDirectoryAttributes(std::string* reason)
 	}
 
 	//Open the directory handle
-	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\oldDir",
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\oldDir",
 		GENERIC_READ | GENERIC_WRITE,
 		FILE_SHARE_READ | FILE_WRITE_ATTRIBUTES,
 		NULL,
@@ -879,19 +903,17 @@ bool TestWriteDirectoryAttributes(std::string* reason)
 		NULL);
 
 	WCHAR finalPath[MAX_PATH] = L"";
-	std::string errorMessage;
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		directory,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
 		CloseHandle(directory);
-		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\oldDir");
 		return false;
 	}
 
@@ -899,7 +921,7 @@ bool TestWriteDirectoryAttributes(std::string* reason)
 	{
 		*reason = FormattedString("Path is a dynamic cache when it should be a remote path %ss\n\n", finalPath);
 		CloseHandle(directory);
-		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\oldDir");
 		return false;
 	}
 
@@ -913,7 +935,7 @@ bool TestWriteDirectoryAttributes(std::string* reason)
 	{
 		*reason = FormattedString("Failed to get file information: %d\n\n", GetLastError());
 		CloseHandle(directory);
-		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\oldDir");
 		return FALSE;
 	}
 
@@ -936,36 +958,41 @@ bool TestWriteDirectoryAttributes(std::string* reason)
 	{
 		*reason = FormattedString("Failed to set file information with error %d", GetLastError());
 		CloseHandle(directory);
-		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\oldDir");
 		return false;
 	}
 
 	CloseHandle(directory);
-	//RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+	RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\oldDir");
 	return true;
 }
 
 bool TestRenameDirectory(std::string* reason)
 {
 	//Need to create a directory to rename
-	/*
-	BOOL dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\directoryToRename", NULL);
+	BOOL dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\directoryToRename", NULL);
 
 	if (!dwRet)
 	{
 		*reason = FormattedString("Directory creation failed with code %d", GetLastError());
 		return false;
 	}
-	*/
-	DWORD dwRet = MoveFileExA(
-				"D:\\home\\site\\wwwroot\\directoryToRename",
-				"D:\\home\\site\\wwwroot\\RenamedDirectory",
+	
+	//Rename the directory
+	dwRet = MoveFileExA(
+				"D:\\home\\site\\wwwroot\\TestDirectories\\directoryToRename",
+				"D:\\home\\site\\wwwroot\\TestDirectories\\RenamedDirectory",
 				NULL);
+
+	if (!dwRet)
+	{
+		*reason = FormattedString("Rename directory failed with code %d \n\n", GetLastError());
+	}
 
 	//ensure it exists remotely by detouring dynamic cache before opening
 	enterDetour();
 
-	HANDLE hRenamedDir = CreateFileW(L"D:\\home\\site\\wwwroot\\oldDir",
+	HANDLE hRenamedDir = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\RenamedDirectory",
 								GENERIC_READ,
 								FILE_SHARE_READ,
 								NULL,
@@ -975,17 +1002,15 @@ bool TestRenameDirectory(std::string* reason)
 	leaveDetour();
 
 	WCHAR finalPath[MAX_PATH] = L"";
-	std::string errorMessage;
 
 	dwRet = EnterDetourAndGetFinalPathNameByHandle(
 		hRenamedDir,
-		&errorMessage,
 		finalPath,
 		_countof(finalPath));
 
 	if (dwRet == 0)
 	{
-		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d, and because %s\n\n", GetLastError(), errorMessage.c_str());
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %ds\n\n", GetLastError());
 		CloseHandle(hRenamedDir);
 		return false;
 	}
@@ -996,11 +1021,13 @@ bool TestRenameDirectory(std::string* reason)
 	{
 		*reason = FormattedString("Expected a remote path but %ws is a local path \n\n", finalPath);
 		CloseHandle(hRenamedDir);
+		RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\RenamedDirectory");
 		return false;
 	}
 
-	//need to ensure cache is hydrated thoug
-
+	//need to ensure cache is hydrated though
+	CloseHandle(hRenamedDir);
+	RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\RenamedDirectory");
 	return true;
 }
 
@@ -1068,16 +1095,55 @@ bool RunSetup()
 		printf("get proc address failed with %d \n", GetLastError());
 		return false;
 	}
+	
+	//crete resources to be used later
+	//CreateDirectory(L"D:\\home\\site\\wwwroot\\directoryToRename", NULL);
 
 	//TODO: delete any files/directories if they exist from previous runs
 	//It's okay if these fail -- they might not exist so failure would be expected.
-	RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+	//RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\oldDir");
+	//RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\RenamedDirectory");
 
 	return true;
 }
 
+void SetupTestEnvironment()
+{
+	BOOL dwRet = CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories", NULL) &&
+		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst", NULL) &&
+		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirstHydrated", NULL) &&
+		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\TestOpenDirRecentlyChanged1", NULL) &&
+		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\TestOpenDirRecentlyChanged2", NULL) &&
+		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\StandardRDC", NULL) &&
+		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\DirectoryOpenForWrite", NULL);
+
+	if (!dwRet)
+	{
+		printf("Error setting up environment for tests. Failed with code %d", GetLastError());
+	}
+
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile2.txt",
+		GENERIC_WRITE,
+		0,
+		NULL,
+		CREATE_NEW,
+		0,
+		NULL);
+
+	CloseHandle(file);
+}
+
 int main()
 {
+	if (oneTimeEnvSetupForTests)
+	{
+		printf("Setting up test environment... \n\n");
+		fflush(stdout);
+		SetupTestEnvironment();
+
+		//return immediately since directories have been recently created
+		return 0;
+	}
 
 	if (waitfordebugger)
 	{
@@ -1097,6 +1163,7 @@ int main()
 	}
 
 	//Note: these tests are in a specific order. Please do not reorder them. Otherwise synchronization could be messed up
+	//TODO: put each test in its own subdirectory
 	ADD_TEST_CASE(TestOpenDirectoryNotRecentlyChanged);
 	ADD_TEST_CASE(TestOpenRecentlyChangeDirHandleAddFile);
 	ADD_TEST_CASE(TestOpenRecentlyChangedDirectoryDeleteFile);
@@ -1109,10 +1176,9 @@ int main()
 	ADD_TEST_CASE(TestCreateAndDeleteDirectory);
 	ADD_TEST_CASE(TestWriteDirectoryAttributes);
 	ADD_TEST_CASE(TestRenameDirectory);
-	//Test readdirectorychanges on newly created directory
-	//test rename directory
 
-	
+	//Test readdirectorychanges on newly created directory
+
 	RunTests();
 }
 
