@@ -7,7 +7,7 @@
 #define ADD_TEST_CASE(f) AddTestCase(L#f, f)
 
 
-bool waitfordebugger = FALSE;
+bool waitfordebugger = TRUE;
 bool oneTimeEnvSetupForTests = FALSE;
 int g_testCaseCount = 0;
 
@@ -126,6 +126,26 @@ void CreateFileForRDCinDetour()
 void CreateFileForRDC()
 {
 	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\StandardRDC\\newfile123.txt",
+		DELETE,
+		FILE_SHARE_READ | FILE_SHARE_DELETE,
+		NULL,
+		CREATE_NEW,
+		FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE,
+		NULL);
+
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		printf("CreatefileW (file) call failed with code %d", GetLastError());
+	}
+	else
+	{
+		CloseHandle(file);
+	}
+}
+
+void CreateFileInWwwroot()
+{
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\newfile123.txt",
 		DELETE,
 		FILE_SHARE_READ | FILE_SHARE_DELETE,
 		NULL,
@@ -331,7 +351,8 @@ bool TestOpenDirectoryNotRecentlyChanged(std::string* reason)
 
 bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 /*
-	
+	Tests FindFirstFile and FindNextFile
+
 	Call FindFirstFile on this which will open the directory and then call into NtQueryDirectoryFile
 	With my changes, since the directory has been recently modified, the handle should be opened locally
 	If the detour for NtQueryDirectoryFile were not implemented, it would return not found since dynamic cache will not contain this file. 
@@ -340,12 +361,20 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 {	
 	bool result = FALSE;
 	HANDLE hFind;
+	HANDLE file2 = INVALID_HANDLE_VALUE;
 	bool hr;
-	HANDLE file1 = INVALID_HANDLE_VALUE;
 
 	enterDetour();
-	//Create a new file which should not be cached
+	//Create two new files which should not be cached
 	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile1.txt",
+		GENERIC_WRITE,
+		0,
+		NULL,
+		OPEN_ALWAYS,
+		0,
+		NULL);
+
+	HANDLE file1 = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile2.txt",
 		GENERIC_WRITE,
 		0,
 		NULL,
@@ -355,14 +384,14 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 
 	leaveDetour();
 
-	if (file == INVALID_HANDLE_VALUE)
+	if (file == INVALID_HANDLE_VALUE || file1 == INVALID_HANDLE_VALUE)
 	{
 		*reason = FormattedString("CreatefileW (file) call failed with code %d", GetLastError());
 		goto Finished;
 	}
 	
 	//Mark the directory as recently changed by creating and deleting a file
-	file1 = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile2.txt",
+	file2 = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile3.txt",
 		GENERIC_WRITE | DELETE,
 		FILE_SHARE_DELETE,
 		NULL,
@@ -370,11 +399,11 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 		FILE_FLAG_DELETE_ON_CLOSE,
 		NULL);
 
-	CloseHandle(file1);
+	CloseHandle(file2);
 
-	//Call findfirst on file
+	//Call findfirst on file with .txt 
 	WIN32_FIND_DATAA FindFileData;
-	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile1.txt", &FindFileData);
+	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\*.txt", &FindFileData);
 
 	if (hFind == INVALID_HANDLE_VALUE)
 	{
@@ -384,8 +413,20 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 	else
 	{
 		printf(("The first file found is %s!!!\n\n"), FindFileData.cFileName);
-		hr = FindClose(hFind);
 
+		//Call findnext using the same handle
+		FindNextFileA(hFind, &FindFileData);
+		
+		if (hFind == INVALID_HANDLE_VALUE)
+		{
+			*reason = FormattedString("FindNextFile failed (%d)\n", GetLastError());
+			FindClose(hFind);
+			goto Finished;
+		}
+
+		printf(("FindNextFile found %s!!!\n\n"), FindFileData.cFileName);
+
+		hr = FindClose(hFind);
 		if (!hr)
 		{
 			printf("FindClose failed (%d)\n", GetLastError());
@@ -397,7 +438,9 @@ bool TestQueryDirectoryFileOnRecentlyChangedDir(std::string* reason)
 Finished:
 
 	CloseHandle(file);
+	CloseHandle(file1);
 	DeleteFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile1.txt");
+	DeleteFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\FindFirst\\newfile2.txt");
 	return result;
 }
 
@@ -542,7 +585,7 @@ bool TestOpenDirectoryWithWrite(std::string* reason)
 	return true;
 }
 
-bool TestStandardReadDirectoryChangesCall(std::string* reason)
+bool TestReadDirectoryChangesNoDetour(std::string* reason)
 /*+
 	Assert handle is opened locally
 	Call ReadDirectoryChanges on this local handle
@@ -559,7 +602,7 @@ bool TestStandardReadDirectoryChangesCall(std::string* reason)
 		OPEN_EXISTING,
 		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
 		NULL);
-
+	//Sleep(100);
 	if (directory == INVALID_HANDLE_VALUE)
 	{
 		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
@@ -590,7 +633,7 @@ bool TestStandardReadDirectoryChangesCall(std::string* reason)
 		CloseHandle(directory);
 		return false;
 	}
-
+	
 	printf("Listening to change notifications on path %ws\n\n", finalPath);
 	unsigned char buffer[8192];
 
@@ -599,6 +642,7 @@ bool TestStandardReadDirectoryChangesCall(std::string* reason)
 	if (overlapped.hEvent == NULL)
 	{
 		*reason = FormattedString("Create event failed with code %d \n\n", GetLastError());
+		CloseHandle(directory);
 		return false;
 	}
 
@@ -613,7 +657,10 @@ bool TestStandardReadDirectoryChangesCall(std::string* reason)
 		&overlapped,
 		NULL);
 
+	
 	CreateFileForRDC();
+
+	Sleep(100); //sleep to handle delete compensation
 
 	DWORD dwWaitStatus = WaitForSingleObject(overlapped.hEvent, 1000*60);
 
@@ -807,7 +854,6 @@ bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
 	OVERLAPPED overlapped = { 0 };
 	DWORD dwBytesTransferred = 0;
 	DWORD dwBytesReturned = 0;
-	//std::thread thread(CreateNewFileInNestedSubdir);
 
 	enterDetour();
 	//Create a new directory very nested under wwwroot
@@ -859,7 +905,7 @@ bool TestReadDirectoryChangesNestedDirectory(std::string* reason)
 		*reason = FormattedString("Expected local path, but instead listening for change notifications on a remote path. Path is %ws", finalPath);
 		goto Finished;
 	}
-
+	
 	printf("Listening to change notifications on path %ws\n\n", finalPath);
 	unsigned char buffer[8192];
 
@@ -1116,7 +1162,7 @@ bool TestRenameDirectory(std::string* reason)
 {
 	//Need to create a directory to rename
 	BOOL dwRet = CreateDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\directoryToRename", NULL);
-
+	
 	if (!dwRet)
 	{
 		*reason = FormattedString("Directory creation failed with code %d", GetLastError());
@@ -1174,6 +1220,339 @@ bool TestRenameDirectory(std::string* reason)
 	CloseHandle(hRenamedDir);
 	RemoveDirectoryW(L"D:\\home\\site\\wwwroot\\TestDirectories\\RenamedDirectory");
 	return true;
+}
+
+bool TestReadDirectoryChangesWwwroot(std::string* reason)
+/*+
+	Test ReadDirectoryChanges call on wwwroot since this may behave slightly differently than nested subdirectories.
+	I am not entering dynamic cache detour so this should behave like a customer appliation
+
+	This should be the last test to run in the test suite since I am triggering a change notification on wwwroot
+*/
+{
+	//Add a sleep to prevent other change notifications from firing
+	Sleep(100);
+
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+		FILE_LIST_DIRECTORY,
+		FILE_SHARE_READ,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+		NULL);
+
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
+		return false;
+	}
+
+	WCHAR finalPath[MAX_PATH] = L"";
+	DWORD dwRet;
+	OVERLAPPED overlapped = { 0 };
+	DWORD dwBytesTransferred = 0;
+	DWORD dwBytesReturned = 0;
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		finalPath,
+		_countof(finalPath));
+
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
+		CloseHandle(directory);
+		return false;
+	}
+	
+	if (!IsDynamicCachePath(finalPath))
+	{
+		*reason = FormattedString("Expected local path, but instead listening for change notifications on a remote path. Path is %ws", finalPath);
+		CloseHandle(directory);
+		return false;
+	}
+	
+	printf("Listening to change notifications on path %ws\n\n", finalPath);
+	unsigned char buffer[8192];
+
+	ZeroMemory(&overlapped, sizeof(overlapped));
+	overlapped.hEvent = CreateEvent(NULL, /*manual reset*/ TRUE, /*initial state*/ FALSE, NULL);
+	if (overlapped.hEvent == NULL)
+	{
+		*reason = FormattedString("Create event failed with code %d \n\n", GetLastError());
+		CloseHandle(directory);
+		return false;
+	}
+
+	//make a call to read directory changes
+	dwRet = ReadDirectoryChangesW(
+		directory,
+		buffer,
+		_countof(buffer),
+		TRUE,
+		FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+		&dwBytesReturned,
+		&overlapped,
+		NULL);
+
+	CreateFileInWwwroot();
+
+	DWORD dwWaitStatus = WaitForSingleObject(overlapped.hEvent, 1000 * 60);
+
+	if (dwWaitStatus == WAIT_OBJECT_0)
+	{
+		dwRet = GetOverlappedResult(directory, &overlapped, &dwBytesTransferred, FALSE);
+
+		if (!dwRet)
+		{
+			*reason = FormattedString("GetOverlappedResult failed with code %d\n\n", GetLastError());
+			CloseHandle(directory);
+			return false;
+		}
+
+		unsigned char* currentRecord = buffer;
+		PFILE_NOTIFY_INFORMATION notifyInfo = (PFILE_NOTIFY_INFORMATION)currentRecord;
+
+		WCHAR filename[MAX_PATH] = { 0 };
+
+		DWORD action = notifyInfo->Action;
+
+		// Copy out the file name as it is not null terminated.
+		if (notifyInfo->FileNameLength < (MAX_PATH * sizeof(WCHAR)))
+		{
+			CopyMemory(filename, notifyInfo->FileName, notifyInfo->FileNameLength);
+			printf("Change notification arrived for file %ws and action %d\n\n", filename, action);
+			CloseHandle(overlapped.hEvent);
+			CloseHandle(directory);
+			return TRUE;
+		}
+	}
+	else
+	{
+		//assume timeout
+		*reason = "ReadDirectoryChanges() call timed out";
+		CloseHandle(overlapped.hEvent);
+		CloseHandle(directory);
+		return FALSE;
+	}
+
+	return FALSE;
+}
+
+bool TestReadDirectoryChangesWwwrootInDetour(std::string* reason)
+/*
+	Tests change notifications in wwwroot while in dynamic cache detour
+*/
+{
+	//Add a sleep to prevent other change notifications from firing
+	Sleep(100);
+	
+	WCHAR finalPath[MAX_PATH] = L"";
+	DWORD dwRet;
+	OVERLAPPED overlapped = { 0 };
+	DWORD dwBytesTransferred = 0;
+	DWORD dwBytesReturned = 0;
+	BOOL result = false;
+
+	enterDetour();
+
+	HANDLE directory = CreateFileW(L"D:\\home\\site\\wwwroot",
+		FILE_LIST_DIRECTORY,
+		FILE_SHARE_READ,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+		NULL);
+
+	leaveDetour();
+	if (directory == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (directory) call failed with code %d", GetLastError());
+		return false;
+	}
+
+	dwRet = EnterDetourAndGetFinalPathNameByHandle(
+		directory,
+		finalPath,
+		_countof(finalPath));
+
+	enterDetour();
+	if (dwRet == 0)
+	{
+		*reason = FormattedString("GetFinalPathNameByHandle failed with code %d\n\n", GetLastError());
+		CloseHandle(directory);
+		leaveDetour();
+		return false;
+	}
+
+	if (IsDynamicCachePath(finalPath))
+	{
+		*reason = FormattedString("Expected remote path, but instead listening for change notifications on a local path. Path is %ws", finalPath);
+		CloseHandle(directory);
+		leaveDetour();
+		return false;
+	}
+
+	printf("Listening to change notifications on path %ws\n\n", finalPath);
+	unsigned char buffer[8192];
+
+	ZeroMemory(&overlapped, sizeof(overlapped));
+	overlapped.hEvent = CreateEvent(NULL, /*manual reset*/ TRUE, /*initial state*/ FALSE, NULL);
+	if (overlapped.hEvent == NULL)
+	{
+		*reason = FormattedString("Create event failed with code %d \n\n", GetLastError());
+		CloseHandle(directory);
+		leaveDetour();
+		return false;
+	}
+
+	//make a call to read directory changes
+	dwRet = ReadDirectoryChangesW(
+		directory,
+		buffer,
+		_countof(buffer),
+		TRUE,
+		FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+		&dwBytesReturned,
+		&overlapped,
+		NULL);
+
+	CreateFileInWwwroot();
+
+	DWORD dwWaitStatus = WaitForSingleObject(overlapped.hEvent, 1000 * 60);
+
+	if (dwWaitStatus == WAIT_OBJECT_0)
+	{
+		dwRet = GetOverlappedResult(directory, &overlapped, &dwBytesTransferred, FALSE);
+
+		if (!dwRet)
+		{
+			*reason = FormattedString("GetOverlappedResult failed with code %d\n\n", GetLastError());
+			CloseHandle(directory);
+			leaveDetour();
+			return false;
+		}
+
+		unsigned char* currentRecord = buffer;
+		PFILE_NOTIFY_INFORMATION notifyInfo = (PFILE_NOTIFY_INFORMATION)currentRecord;
+
+		WCHAR filename[MAX_PATH] = { 0 };
+
+		DWORD action = notifyInfo->Action;
+
+		// Copy out the file name as it is not null terminated.
+		if (notifyInfo->FileNameLength < (MAX_PATH * sizeof(WCHAR)))
+		{
+			CopyMemory(filename, notifyInfo->FileName, notifyInfo->FileNameLength);
+			printf("Change notification arrived for file %ws and action %d\n\n", filename, action);
+			CloseHandle(overlapped.hEvent);
+			CloseHandle(directory);
+			leaveDetour();
+			return TRUE;
+		}
+	}
+	else
+	{
+		//assume timeout
+		*reason = "ReadDirectoryChanges() call timed out";
+		CloseHandle(overlapped.hEvent);
+		CloseHandle(directory);
+		//leaveDetour();
+		return FALSE;
+	}
+
+	return FALSE;
+}
+
+bool TestCancelIOFile(std::string* reason)
+/*
+	Tests DetourNtCancelIoFile.
+
+	Need to call on a handle which has been recently changes and used to call into FindFirstFile. This will ensure the hande is in the map. 
+*/
+{
+	bool result = FALSE;
+	HANDLE hFind;
+	HANDLE file2 = INVALID_HANDLE_VALUE;
+	HANDLE dir = INVALID_HANDLE_VALUE;
+	DWORD hr;
+
+	enterDetour();
+	//Create a new file which should not be cached
+	HANDLE file = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\CancelIo\\newfile1.txt",
+		GENERIC_WRITE,
+		0,
+		NULL,
+		OPEN_ALWAYS,
+		0,
+		NULL);
+
+	leaveDetour();
+
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("CreatefileW (file) call failed with code %d", GetLastError());
+		goto Finished;
+	}
+
+	//Mark the directory as recently changed by creating and deleting a file
+	file2 = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\CancelIo\\newfile2.txt",
+		GENERIC_WRITE | DELETE,
+		FILE_SHARE_DELETE,
+		NULL,
+		OPEN_ALWAYS,
+		FILE_FLAG_DELETE_ON_CLOSE,
+		NULL);
+
+	CloseHandle(file2);
+
+	//Call findfirst on file with .txt 
+	WIN32_FIND_DATAA FindFileData;
+	hFind = FindFirstFileA("D:\\home\\site\\wwwroot\\TestDirectories\\CancelIo\\*.txt", &FindFileData);
+
+	if (hFind == INVALID_HANDLE_VALUE)
+	{
+		*reason = FormattedString("FindFirstFile failed (%d)\n", GetLastError());
+		goto Finished;
+	}
+
+	//Call into CancelIo with the directory handle
+	dir = CreateFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\CancelIo",
+		GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		NULL,
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS,
+		NULL);
+
+	hr = CancelIoEx(dir, NULL);
+
+	if (FAILED(hr))
+	{
+		*reason = FormattedString("CancelIoEx failed (%d)\n", GetLastError());
+		FindClose(hFind);
+		goto Finished;
+	}
+
+	hr = FindClose(hFind);
+	if (!hr)
+	{
+		printf("FindClose failed (%d)\n", GetLastError());
+	}
+
+	CloseHandle(dir);
+	result = TRUE;
+
+Finished:
+
+	if (dir != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(dir);
+	}
+
+	CloseHandle(file);
+	DeleteFileW(L"D:\\home\\site\\wwwroot\\TestDirectories\\CancelIo\\newfile1.txt");
+	return result;
 }
 
 #pragma endregion
@@ -1262,7 +1641,8 @@ void SetupTestEnvironment()
 		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\StandardRDC", NULL) &&
 		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\DirectoryOpenForWrite", NULL) &&
 		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\UnusedDirectory", NULL) &&
-		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\RDCinDetour", NULL);
+		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\RDCinDetour", NULL) &&
+		CreateDirectory(L"D:\\home\\site\\wwwroot\\TestDirectories\\CancelIo", NULL);
 
 	if (!dwRet)
 	{
@@ -1311,7 +1691,7 @@ int main()
 		printf("Setup failed with code %d. Aborting tests.\n\n", GetLastError());
 	}
 
-	//Note: these tests are in a specific order. Please do not reorder them. Otherwise synchronization could be messed up
+	ADD_TEST_CASE(TestReadDirectoryChangesNoDetour);
 	ADD_TEST_CASE(TestOpenDirectoryNotRecentlyChanged);
 	ADD_TEST_CASE(TestOpenRecentlyChangeDirHandleAddFile);
 	ADD_TEST_CASE(TestOpenRecentlyChangedDirectoryDeleteFile);
@@ -1319,13 +1699,17 @@ int main()
 	//ADD_TEST_CASE(TestQueryDirectoryFileOnRecentlyChangedDirWithoutDetour);
 	ADD_TEST_CASE(TestQueryDirectoryFileOnHydratedDir);
 	ADD_TEST_CASE(TestOpenDirectoryWithWrite);
-	ADD_TEST_CASE(TestStandardReadDirectoryChangesCall);
 	ADD_TEST_CASE(TestReadDirectoryChangesNestedDirectory);
 	ADD_TEST_CASE(TestReadDirectoryChangesInDetour);
-	ADD_TEST_CASE(TestCreateAndDeleteDirectory);
+	//ADD_TEST_CASE(TestCreateAndDeleteDirectory);
 	ADD_TEST_CASE(TestWriteDirectoryAttributes);
 	ADD_TEST_CASE(TestRenameDirectory);
+	ADD_TEST_CASE(TestCancelIOFile);
 
+	//these two test cases should be the last to run since I am triggering a change notification in wwwroot
+	ADD_TEST_CASE(TestReadDirectoryChangesWwwroot);
+	ADD_TEST_CASE(TestReadDirectoryChangesWwwrootInDetour);
+	
 	//Test readdirectorychanges on newly created directory
 
 	RunTests();
